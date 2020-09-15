@@ -56,6 +56,7 @@ logging.basicConfig(stream=sys.stderr, level=logging.WARNING,
 log.setLevel(max(3 - args.verbose_count, 0) * 10)
 
 
+
 def _dayToStr(date):
     return date.strftime("%d/%m/%Y")
 
@@ -100,6 +101,8 @@ influx_client = InfluxDBClient(
     username=args.INFLUXDB_USERNAME,
     password=args.INFLUXDB_PASSWORD,
     database=args.INFLUXDB_DATABASE,
+    timeout=5,
+    retries=2,
 )
 
 jsonInflux = []
@@ -131,6 +134,7 @@ if type_requested == 'daily_consumption':
     for data in result['meter_reading']['interval_reading']:
         date_time_obj = datetime.datetime.strptime(data['date'], '%Y-%m-%d')
         now = datetime.datetime.now()
+        log.debug(date_time_obj.strftime('%Y-%m-%dT%H:%M:%S')  + ' - ' + data['value'])
 
         jsonInflux.append({
             "measurement": "enedis_consumption_per_day",
@@ -156,6 +160,7 @@ elif type_requested == 'consumption_load_curve':
     for data in result['meter_reading']['interval_reading']:
         date_time_obj = datetime.datetime.strptime(data['date'], '%Y-%m-%d')
         now = datetime.datetime.now()
+        log.debug(date_time_obj.strftime('%Y-%m-%dT%H:%M:%S')  + ' - ' + data['value'])
 
         jsonInflux.append({
             "measurement": "enedis_consumption_per_30min",
