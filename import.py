@@ -8,6 +8,9 @@ from influxdb import InfluxDBClient
 import datetime
 import argparse
 import logging
+import re
+import decimal
+from decimal import Decimal
 
 
 # Rate limiting is mandatory
@@ -17,7 +20,7 @@ DATAHUB_HOST = 'enedis.valent1.fr'
 DATAHUB_SCHEME = 'https'
 TYPES = (
     'consumption_load_curve',
-    'consumption_max_power',
+    'daily_consumption_max_power',
     'daily_consumption',
     'production_load_curve',
     'daily_production',
@@ -45,6 +48,10 @@ parser.add_argument("--usage-point-id", help="Your usage point id",
                     dest="USAGE_POINT_ID", default="00000000", required=True)
 parser.add_argument("--auth-token", help="Authentication Token",
                     dest="AUTH_TOKEN", default="mytoken", required=True)
+parser.add_argument("--start-date", help="Start date",
+                    dest="START_DATE", default="2020-09-08", required=True)
+parser.add_argument("--end-date", help="End date",
+                    dest="END_DATE", default="2020-09-09", required=True)
 parser.add_argument("-v", "--verbose", dest="verbose_count", action="count",
                     default=0, help="increases log verbosity")
 
@@ -54,7 +61,6 @@ log = logging.getLogger()
 logging.basicConfig(stream=sys.stderr, level=logging.WARNING,
                     format='%(name)s (%(levelname)s): %(message)s')
 log.setLevel(max(3 - args.verbose_count, 0) * 10)
-
 
 
 def _dayToStr(date):
@@ -77,9 +83,15 @@ def call_enedis(type=False, usage_point_id=False, start=False, end=False):
     payload = {
         'type': type,
         'usage_point_id': usage_point_id,
-        'start': start,
-        'end': end
     }
+
+    if start:
+        payload['start'] = start
+
+    if end:
+        payload['end'] = end
+
+    log.debug(payload)
 
     url = '{}://{}/api'.format(DATAHUB_SCHEME, DATAHUB_HOST)
 
@@ -90,6 +102,7 @@ def call_enedis(type=False, usage_point_id=False, start=False, end=False):
     )
 
     if r.status_code != 200:
+        log.error(r.text)
         return False
 
     return r.json()
@@ -105,6 +118,22 @@ influx_client = InfluxDBClient(
     retries=2,
 )
 
+# Initially, request contracts to have the max allowed consumtpion
+
+contracts = call_enedis(
+    type='contracts',
+    usage_point_id=args.USAGE_POINT_ID,
+)
+
+max_consumption_allowed = 0
+for c in contracts['customer']['usage_points']:
+    log.debug(c)
+    if(c['usage_point']['usage_point_id'] == args.USAGE_POINT_ID):
+        # This is the one
+        subscribed_power_str = re.search('^([0-9]*) kVA', c['contracts']['subscribed_power'])
+        subscribed_power = int(subscribed_power_str.group(1))
+
+
 jsonInflux = []
 
 type_requested = args.TYPE
@@ -112,8 +141,8 @@ type_requested = args.TYPE
 result = call_enedis(
     type=type_requested,
     usage_point_id=args.USAGE_POINT_ID,
-    start='2020-09-08',
-    end='2020-09-09'
+    start=args.START_DATE,
+    end=args.END_DATE
 )
 
 if not result:
@@ -143,6 +172,7 @@ if type_requested == 'daily_consumption':
             "time": date_time_obj.strftime('%Y-%m-%dT%H:%M:%S'),
             "fields": {
                 "value": int(data['value']),
+                "subscribed_power": subscribed_power,
             }
         })
 
@@ -158,17 +188,25 @@ elif type_requested == 'consumption_load_curve':
         sys.exit(2)
 
     for data in result['meter_reading']['interval_reading']:
-        date_time_obj = datetime.datetime.strptime(data['date'], '%Y-%m-%d')
+        log.debug(data)
+        date_time_obj = datetime.datetime.strptime(data['date'], '%Y-%m-%d %H:%M:%S') + datetime.timedelta(minutes=1)
         now = datetime.datetime.now()
-        log.debug(date_time_obj.strftime('%Y-%m-%dT%H:%M:%S')  + ' - ' + data['value'])
+        # log.debug(date_time_obj.strftime('%Y-%m-%dT%H:%M:%S')  + ' - ' + data['value'])
+
+        value = float(data['value']) /1000
+        decimal.getcontext().rounding = decimal.ROUND_HALF_UP
+        right_rounding = Decimal(value).quantize(Decimal("1.0"))
 
         jsonInflux.append({
-            "measurement": "enedis_consumption_per_30min",
+            "measurement": "consumption_load_curve",
             "tags": {
             },
             "time": date_time_obj.strftime('%Y-%m-%dT%H:%M:%S'),
             "fields": {
-                "value": int(data['value']),
+                "value": right_rounding,
+                "interval_length": str(data['interval_length']),
+                "measure_type": str(data['measure_type']),
+                "subscribed_power": subscribed_power,
             }
         })
 
